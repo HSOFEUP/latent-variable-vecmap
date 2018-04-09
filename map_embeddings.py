@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import scipy.optimize
+import munkres_sparse
 
 # Maximum dimensions for the similarity matrix computation in memory
 # A MAX_DIM_X * MAX_DIM_Z dimensional matrix will be used
@@ -42,6 +43,7 @@ def main():
     parser.add_argument('--encoding', default='utf-8', help='the character encoding for input/output (defaults to utf-8)')
     parser.add_argument('--precision', choices=['fp16', 'fp32', 'fp64'], default='fp64', help='the floating-point precision (defaults to fp64)')
     parser.add_argument('--cuda', action='store_true', help='use cuda (requires cupy)')
+    parser.add_argument('--num-words', type=int, help='whether to use only the top n most frequent words for learning embeddings')
     mapping_group = parser.add_argument_group('mapping arguments', 'Basic embedding mapping arguments (EMNLP 2016)')
     mapping_group.add_argument('-d', '--dictionary', default=sys.stdin.fileno(), help='the training dictionary file (defaults to stdin)')
     mapping_group.add_argument('--normalize', choices=['unit', 'center', 'unitdim', 'centeremb'], nargs='*', default=[], help='the normalization actions to perform in order')
@@ -58,8 +60,9 @@ def main():
     self_learning_group.add_argument('--log', help='write to a log file in tsv format at each iteration')
     self_learning_group.add_argument('-v', '--verbose', action='store_true', help='write log information to stderr at each iteration')
     self_learning_group.add_argument('--hungarian', action='store_true', help='use the hungarian algorithm for matching source with target ids')
+    self_learning_group.add_argument('--mungres', action='store_true', help='use the sparse Kuhn-Mungres algorithm for matching')
     self_learning_group.add_argument('--otsu', action='store_true', help="use Otsu's method instead of nearest neighbour for inducing the dictionary")
-    self_learning_group.add_argument('--otsu-vals', type=int, default=6, help='# of most similar trg indices used for computing a threshold with Otsus method')
+    self_learning_group.add_argument('--n-similar', type=int, default=6, help='# of most similar trg indices used for computing similarity in Otsu and Kuhn-Munkres')
     self_learning_group.add_argument('--csls', action='store_true', help='use the CSLS scaling used in MUSE for Otsu method')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
@@ -75,14 +78,20 @@ def main():
         print('ERROR: De-whitening requires whitening first', file=sys.stderr)
         sys.exit(-1)
 
-    if args.self_learning and args.hungarian and args.otsu:
-        print('ERROR: Only one of Hungarian or Otsu may be used for self-learning.', file=sys.stderr)
+    if args.self_learning and (args.hungarian and args.otsu) or\
+            (args.hungarian and args.mungres) or (args.mungres and args.otsu):
+        print('ERROR: Only one of Hungarian, Mungres, Otsu may be used for self-learning.', file=sys.stderr)
         sys.exit(-1)
 
     if args.verbose:
         print("Info: arguments\n\t" + "\n\t".join(
             ["{}: {}".format(a, v) for a, v in vars(args).items()]),
               file=sys.stderr)
+        if args.mungres:
+            print(f'Using sparse Kuhn-Mungres algorithm with the top {args.n_similar} '
+                  f'most similar targets.')
+        if args.hungarian:
+            print(f'Using Hungarian algorithm with {args.n_similar}.')
 
     # Choose the right dtype for the desired precision
     if args.precision == 'fp16':
@@ -108,6 +117,15 @@ def main():
         z = xp.asarray(z)
     else:
         xp = np
+
+    if args.num_words:
+        assert args.num_words > 0
+        print(f'Restricting source and target words to top {args.num_words} '
+              f'words...', file=sys.stderr)
+        src_words = src_words[:args.num_words]
+        trg_words = trg_words[:args.num_words]
+        x = x[:args.num_words]
+        z = z[:args.num_words]
 
     # Build word to index map
     src_word2ind = {word: i for i, word in enumerate(src_words)}
@@ -253,14 +271,14 @@ def main():
                 for i in range(0, x.shape[0]):
 
                     sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
-                    indices = xp.argpartition(sim, -args.otsu_vals)[-args.otsu_vals:]  # get indices of largest elements
+                    indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of largest elements
                     indices = indices[xp.argsort(sim[indices])][::-1]  # sort the indices by similarity
                     sim_scores = sim[indices]
 
                     if args.csls:
                         avg_sim_trg = xp.mean(sim[indices])  #  get mean similarity to target words
                         sim_src = xw[i].dot(zw.T) # get the similarity of the source id with all src words
-                        indices_src = xp.argpartition(sim_src, -(args.otsu_vals+1))[-(args.otsu_vals+1):]  # use +1 to ignore the src id itself
+                        indices_src = xp.argpartition(sim_src, -(args.n_similar+1))[-(args.n_similar+1):]  # use +1 to ignore the src id itself
                         indices_src = indices_src[xp.argsort(sim_src[indices_src])][::-1]
                         avg_sim_src = xp.mean(sim_src[indices_src][1:])
                         sim_scores = 2*sim_scores - avg_sim_trg - avg_sim_src
@@ -287,6 +305,21 @@ def main():
                     cost_matrix = xp.asnumpy(cost_matrix)
                 src_indices, trg_indices = scipy.optimize.linear_sum_assignment(cost_matrix)
                 best_sim_forward = 1 - cost_matrix[src_indices, trg_indices]
+            elif args.mungres:  # use the sparse kuhn-munkres algorithm for solving the linear assignment problem
+                cost_matrix_entries = []
+                for i in range(0, x.shape[0]):
+                    sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
+                    trg_indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of n largest elements
+                    costs = 1 - sim[trg_indices]
+                    for j in range(0, args.n_similar):
+                        cost_matrix_entries.append((i, trg_indices[j], costs[j]))
+                print('Length of cost matrix entries:', len(cost_matrix_entries))
+                munkres_match = munkres_sparse.munkres(cost_matrix_entries)
+                print('# of matches:', len(munkres_match))
+                src_indices, trg_indices = zip(*munkres_match)
+                src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
+                for src_idx, trg_idx in zip(src_indices, trg_indices):
+                    best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
             else:
                 # for efficiency and due to space reasons, look at sub-matrices of
                 # size (MAX_DIM_X x MAX_DIM_Z)
