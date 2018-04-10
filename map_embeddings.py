@@ -14,6 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import embeddings
+import time
 from cupy_utils import *
 from mapping_utils import mlp
 from matching_utils import otsu
@@ -26,6 +27,7 @@ import sys
 import time
 import scipy.optimize
 import munkres_sparse
+from lap import lapmod
 
 # Maximum dimensions for the similarity matrix computation in memory
 # A MAX_DIM_X * MAX_DIM_Z dimensional matrix will be used
@@ -64,6 +66,7 @@ def main():
     self_learning_group.add_argument('--otsu', action='store_true', help="use Otsu's method instead of nearest neighbour for inducing the dictionary")
     self_learning_group.add_argument('--n-similar', type=int, default=6, help='# of most similar trg indices used for computing similarity in Otsu and Kuhn-Munkres')
     self_learning_group.add_argument('--csls', action='store_true', help='use the CSLS scaling used in MUSE for Otsu method')
+    self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
     advanced_group.add_argument('--src_reweight', type=float, default=0, nargs='?', const=1, help='re-weight the source language embeddings')
@@ -78,10 +81,10 @@ def main():
         print('ERROR: De-whitening requires whitening first', file=sys.stderr)
         sys.exit(-1)
 
-    if args.self_learning and (args.hungarian and args.otsu) or\
-            (args.hungarian and args.mungres) or (args.mungres and args.otsu):
-        print('ERROR: Only one of Hungarian, Mungres, Otsu may be used for self-learning.', file=sys.stderr)
-        sys.exit(-1)
+    if args.self_learning:
+        if sum([args.hungarian, args.mungres, args.otsu, args.lapmod]) > 1:
+            print('ERROR: Only one of Hungarian, Mungres, Otsu, LAPMOD may be used for self-learning.', file=sys.stderr)
+            sys.exit(-1)
 
     if args.verbose:
         print("Info: arguments\n\t" + "\n\t".join(
@@ -265,6 +268,7 @@ def main():
             src_indices_backward = xp.zeros(z.shape[0], dtype=int)
             trg_indices_backward = xp.arange(z.shape[0])
 
+            start = time.time()
             if args.otsu:  #  use Otsu's method
                 assert args.direction == 'forward'
                 src_indices, trg_indices = [], []
@@ -320,6 +324,32 @@ def main():
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
                 for src_idx, trg_idx in zip(src_indices, trg_indices):
                     best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
+            elif args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
+                n_rows = xw.shape[0]
+                cc, kk = [], []
+                ii = np.empty((n_rows+1,), dtype=int)
+                ii[0] = 0
+                for i in range(1, n_rows+1):
+                    ii[i] = ii[i-1] + args.n_similar
+                start_time = time.time()
+                for i in range(0, x.shape[0]):
+                    sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
+                    trg_indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of n largest elements
+                    trg_indices.sort()  # sort the target indices
+                    costs = 1 - sim[trg_indices]
+                    for j in range(0, args.n_similar):
+                        cc.append(int(costs[j]))
+                        kk.append(int(trg_indices[j]))
+                    if i % 1000 == 0 and i > 0:
+                        print(f'Processed {i} rows.')
+                cc, kk = xp.array(cc), xp.array(kk)
+                print(f'Retrieval of ids took {time.time() - start_time}s.')
+                cost, trg_indices, _ = lapmod(n_rows, cc, ii, kk)  # trg indices are targets assigned to each column id from 0-(n_rows-1)
+                src_indices = np.arange(n_rows)
+                src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
+                for src_idx, trg_idx in zip(src_indices, trg_indices):
+                    best_sim = xw[src_idx].dot(zw[trg_idx].T)
+                    best_sim_forward[src_idx] = best_sim
             else:
                 # for efficiency and due to space reasons, look at sub-matrices of
                 # size (MAX_DIM_X x MAX_DIM_Z)
@@ -354,6 +384,8 @@ def main():
                 elif args.direction == 'union':
                     src_indices = xp.concatenate((src_indices_forward, src_indices_backward))
                     trg_indices = xp.concatenate((trg_indices_forward, trg_indices_backward))
+
+            print(f'Matching took {time.time() - start}s.')
 
             # Objective function evaluation
             prev_objective = objective
