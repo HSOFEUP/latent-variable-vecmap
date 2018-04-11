@@ -67,6 +67,7 @@ def main():
     self_learning_group.add_argument('--n-similar', type=int, default=6, help='# of most similar trg indices used for computing similarity in Otsu and Kuhn-Munkres')
     self_learning_group.add_argument('--csls', action='store_true', help='use the CSLS scaling used in MUSE for Otsu method')
     self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
+    self_learning_group.add_argument('--lapmod-chunk-size', default=1000, type=int, help='default size of matrix chunks for LAPMOD')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
     advanced_group.add_argument('--src_reweight', type=float, default=0, nargs='?', const=1, help='re-weight the source language embeddings')
@@ -326,25 +327,35 @@ def main():
                     best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
             elif args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
                 n_rows = xw.shape[0]
-                cc, kk = [], []
-                ii = np.empty((n_rows+1,), dtype=int)
+                cc, kk = np.empty(n_rows * args.n_similar), np.empty(
+                    n_rows * args.n_similar)
+                ii = np.empty((n_rows + 1,), dtype=int)
                 ii[0] = 0
-                for i in range(1, n_rows+1):
-                    ii[i] = ii[i-1] + args.n_similar
+                for i in range(1, n_rows + 1):
+                    ii[i] = ii[i - 1] + args.n_similar
                 start_time = time.time()
-                for i in range(0, x.shape[0]):
-                    sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
-                    trg_indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of n largest elements
+                for i in range(0, x.shape[0], args.lapmod_chunk_size):
+                    j = min(x.shape[0], i + args.lapmod_chunk_size)
+                    sim = xw[i:j].dot(zw.T)  # get the similarity scores of the source id with all target ids
+                    trg_indices = xp.argpartition(sim, -args.n_similar)[:, -args.n_similar:]  # get indices of n largest elements
+                    if xp != np:
+                        trg_indices = xp.asnumpy(trg_indices)
                     trg_indices.sort()  # sort the target indices
-                    costs = 1 - sim[trg_indices]
-                    for j in range(0, args.n_similar):
-                        cc.append(int(costs[j]))
-                        kk.append(int(trg_indices[j]))
-                    if i % 1000 == 0 and i > 0:
+
+                    row_indices = np.array([[i] * args.n_similar
+                                            for i in range(args.lapmod_chunk_size)]).flatten()
+                    trg_indices = trg_indices.flatten()
+                    sim_scores = sim[row_indices, trg_indices]
+                    costs = 1 - sim_scores
+                    if xp != np:
+                        costs = xp.asnumpy(costs)
+                    cc[i * args.n_similar:j * args.n_similar] = costs
+                    kk[i * args.n_similar:j * args.n_similar] = trg_indices
+                    if i % 10000 == 0 and i > 0:
                         print(f'Processed {i} rows.')
-                cc, kk = xp.array(cc), xp.array(kk)
                 print(f'Retrieval of ids took {time.time() - start_time}s.')
-                cost, trg_indices, _ = lapmod(n_rows, cc, ii, kk)  # trg indices are targets assigned to each column id from 0-(n_rows-1)
+                cost, trg_indices, _ = lapmod(n_rows, cc, ii,
+                                              kk)  # trg indices are targets assigned to each column id from 0-(n_rows-1)
                 src_indices = np.arange(n_rows)
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
                 for src_idx, trg_idx in zip(src_indices, trg_indices):
