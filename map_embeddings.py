@@ -355,7 +355,7 @@ def main():
                         print(f'Processed {i} rows.')
                 print(f'Retrieval of ids took {time.time() - start_time}s.')
                 cost, trg_indices, _ = lapmod(n_rows, cc, ii,
-                                              kk)  # trg indices are targets assigned to each column id from 0-(n_rows-1)
+                                              kk)  # trg indices are targets assigned to each row id from 0-(n_rows-1)
                 src_indices = np.arange(n_rows)
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
                 for src_idx, trg_idx in zip(src_indices, trg_indices):
