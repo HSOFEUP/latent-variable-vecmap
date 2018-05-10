@@ -68,6 +68,7 @@ def main():
     self_learning_group.add_argument('--csls', action='store_true', help='use the CSLS scaling used in MUSE for Otsu method')
     self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
     self_learning_group.add_argument('--lapmod-chunk-size', default=1000, type=int, help='default size of matrix chunks for LAPMOD')
+    self_learning_group.add_argument('--lap-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
     advanced_group.add_argument('--src_reweight', type=float, default=0, nargs='?', const=1, help='re-weight the source language embeddings')
@@ -326,12 +327,12 @@ def main():
                 for src_idx, trg_idx in zip(src_indices, trg_indices):
                     best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
             elif args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
-                n_rows = xw.shape[0]
-                cc, kk = np.empty(n_rows * args.n_similar), np.empty(
-                    n_rows * args.n_similar)
-                ii = np.empty((n_rows + 1,), dtype=int)
+                n_rows = xw.shape[0] # number of rows of the assignment cost matrix
+                cc = np.empty(n_rows * args.n_similar)  # 1D array of all finite elements of the assignement cost matrix
+                kk = np.empty(n_rows * args.n_similar)  # 1D array of indices of the row starts in cc.
+                ii = np.empty((n_rows * args.lap_repeats + 1,), dtype=int)  # 1D array of the column indices. Must be sorted within one row.
                 ii[0] = 0
-                for i in range(1, n_rows + 1):
+                for i in range(1, n_rows * args.lap_repeats + 1):
                     ii[i] = ii[i - 1] + args.n_similar
                 start_time = time.time()
                 for i in range(0, x.shape[0], args.lapmod_chunk_size):
@@ -354,13 +355,30 @@ def main():
                     if i % 10000 == 0 and i > 0:
                         print(f'Processed {i} rows.')
                 print(f'Retrieval of ids took {time.time() - start_time}s.')
-                cost, trg_indices, _ = lapmod(n_rows, cc, ii,
-                                              kk)  # trg indices are targets assigned to each row id from 0-(n_rows-1)
-                src_indices = np.arange(n_rows)
+                if args.lap_repeats > 1:
+                    # duplicate costs and target indices
+                    new_cc = cc
+                    new_kk = kk
+                    for i in range(1, args.lap_repeats):
+                        cc = np.concatenate([new_cc, cc], axis=0)
+                        # update target indices so that they refer to new columns
+                        new_kk = np.concatenate([new_kk, kk + n_rows*i], axis=0)
+                    cc = new_cc
+                    kk = new_kk
+                # trg indices are targets assigned to each row id from 0-(n_rows-1)
+                cost, trg_indices, _ = lapmod(n_rows*args.lap_repeats, cc, ii, kk)
+                src_indices = np.concatenate([np.arange(n_rows)] * args.lap_repeats, 0)
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
-                for src_idx, trg_idx in zip(src_indices, trg_indices):
+                for i in range(len(src_indices)):
+                    src_idx, trg_idx = src_indices[i], trg_indices[i]
+                    # we do this if args.lap_repeats > 0 to assign the target
+                    # indices in the cost matrix to the correct idx
+                    while trg_idx >= n_rows:
+                        # if we repeat, we have indices that are > n_rows
+                        trg_idx -= n_rows
+                        trg_indices[i] = trg_idx
                     best_sim = xw[src_idx].dot(zw[trg_idx].T)
-                    best_sim_forward[src_idx] = best_sim
+                    best_sim_forward[src_idx] = max(best_sim_forward[src_idx], best_sim)
             else:
                 # for efficiency and due to space reasons, look at sub-matrices of
                 # size (MAX_DIM_X x MAX_DIM_Z)
