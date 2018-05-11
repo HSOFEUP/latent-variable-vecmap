@@ -360,7 +360,7 @@ def main():
                     new_cc = cc
                     new_kk = kk
                     for i in range(1, args.lap_repeats):
-                        cc = np.concatenate([new_cc, cc], axis=0)
+                        new_cc = np.concatenate([new_cc, cc], axis=0)
                         # update target indices so that they refer to new columns
                         new_kk = np.concatenate([new_kk, kk + n_rows*i], axis=0)
                     cc = new_cc
