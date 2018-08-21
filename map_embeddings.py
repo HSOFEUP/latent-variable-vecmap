@@ -48,6 +48,7 @@ def main():
     parser.add_argument('--num-words', type=int, help='whether to use only the top n most frequent words for learning embeddings')
     mapping_group = parser.add_argument_group('mapping arguments', 'Basic embedding mapping arguments (EMNLP 2016)')
     mapping_group.add_argument('-d', '--dictionary', default=sys.stdin.fileno(), help='the training dictionary file (defaults to stdin)')
+    mapping_group.add_argument('--test-dict', help='the test dictionary file')
     mapping_group.add_argument('--normalize', choices=['unit', 'center', 'unitdim', 'centeremb'], nargs='*', default=[], help='the normalization actions to perform in order')
     mapping_type = mapping_group.add_mutually_exclusive_group()
     mapping_type.add_argument('-c', '--orthogonal', action='store_true', help='use orthogonal constrained mapping')
@@ -57,6 +58,7 @@ def main():
     self_learning_group.add_argument('--self_learning', action='store_true', help='enable self-learning')
     self_learning_group.add_argument('--direction', choices=['forward', 'backward', 'union'], default='forward', help='the direction for dictionary induction (defaults to forward)')
     self_learning_group.add_argument('--numerals', action='store_true', help='use latin numerals (i.e. words matching [0-9]+) as the seed dictionary')
+    self_learning_group.add_argument('--identical', action='store_true', help='use identical words as training dictionary')
     self_learning_group.add_argument('--threshold', default=0.000001, type=float, help='the convergence threshold (defaults to 0.000001)')
     self_learning_group.add_argument('--validation', default=None, help='a dictionary file for validation at each iteration')
     self_learning_group.add_argument('--log', help='write to a log file in tsv format at each iteration')
@@ -69,6 +71,8 @@ def main():
     self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
     self_learning_group.add_argument('--lapmod-chunk-size', default=1000, type=int, help='default size of matrix chunks for LAPMOD')
     self_learning_group.add_argument('--lap-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment')
+    self_learning_group.add_argument('--lap-prop', default='1:1', help='specify 1:2 or 2:1 for assymmetric matching')
+    self_learning_group.add_argument('--lap-rank', type=int, help='match only the top n most frequent words during matching')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
     advanced_group.add_argument('--src_reweight', type=float, default=0, nargs='?', const=1, help='re-weight the source language embeddings')
@@ -109,8 +113,8 @@ def main():
     # Read input embeddings
     srcfile = open(args.src_input, encoding=args.encoding, errors='surrogateescape')
     trgfile = open(args.trg_input, encoding=args.encoding, errors='surrogateescape')
-    src_words, x = embeddings.read(srcfile, dtype=dtype)
-    trg_words, z = embeddings.read(trgfile, dtype=dtype)
+    src_words, x = embeddings.read(srcfile, dtype=dtype, threshold=200000)
+    trg_words, z = embeddings.read(trgfile, dtype=dtype, threshold=200000)
 
     # NumPy/CuPy management
     if args.cuda:
@@ -132,6 +136,11 @@ def main():
         x = x[:args.num_words]
         z = z[:args.num_words]
 
+    if x.shape[0] > z.shape[0]:
+        print('Restricting X to same same shape as Z.')
+        src_words = src_words[:z.shape[0]]
+        x = x[:z.shape[0]]
+
     # Build word to index map
     src_word2ind = {word: i for i, word in enumerate(src_words)}
     trg_word2ind = {word: i for i, word in enumerate(trg_words)}
@@ -147,6 +156,13 @@ def main():
         trg_numerals = {word for word in trg_words if numeral_regex.match(word) is not None}
         numerals = src_numerals.intersection(trg_numerals)
         for word in numerals:
+            src_indices.append(src_word2ind[word])
+            trg_indices.append(trg_word2ind[word])
+    elif args.identical:
+        print('Using identical strings as dictionary...')
+        intersect = set(src_words).intersection(set(trg_words))
+        print(f'Found {len(intersect)} identical strings.')
+        for word in intersect:
             src_indices.append(src_word2ind[word])
             trg_indices.append(trg_word2ind[word])
     else:
@@ -327,25 +343,35 @@ def main():
                 for src_idx, trg_idx in zip(src_indices, trg_indices):
                     best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
             elif args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
-                n_rows = xw.shape[0] # number of rows of the assignment cost matrix
+                if args.lap_rank is not None:
+                    n_rows = args.lap_rank
+                    best_sim_forward = xp.full(n_rows, -100, dtype=dtype)
+                else:
+                    n_rows = xw.shape[0] # number of rows of the assignment cost matrix
                 cc = np.empty(n_rows * args.n_similar)  # 1D array of all finite elements of the assignement cost matrix
-                kk = np.empty(n_rows * args.n_similar)  # 1D array of indices of the row starts in cc.
-                ii = np.empty((n_rows * args.lap_repeats + 1,), dtype=int)  # 1D array of the column indices. Must be sorted within one row.
+                kk = np.empty(n_rows * args.n_similar)  # 1D array of the column indices. Must be sorted within one row.
+                ii = np.empty((n_rows * args.lap_repeats + 1,), dtype=int)   # 1D array of indices of the row starts in cc.
                 ii[0] = 0
+                # if each src id should be matched to trg id, then we need to double the source indices
                 for i in range(1, n_rows * args.lap_repeats + 1):
                     ii[i] = ii[i - 1] + args.n_similar
                 start_time = time.time()
-                for i in range(0, x.shape[0], args.lapmod_chunk_size):
+                for i in range(0, n_rows, args.lapmod_chunk_size):
                     j = min(x.shape[0], i + args.lapmod_chunk_size)
-                    sim = xw[i:j].dot(zw.T)  # get the similarity scores of the source id with all target ids
+                    if args.lap_rank:
+                        # only compute the similarity up to the specified rank
+                        sim = xw[i:j].dot(zw[:n_rows].T)
+                    else:
+                        sim = xw[i:j].dot(zw.T)  # get the similarity scores of the source id with all target ids
+
                     trg_indices = xp.argpartition(sim, -args.n_similar)[:, -args.n_similar:]  # get indices of n largest elements
                     if xp != np:
                         trg_indices = xp.asnumpy(trg_indices)
                     trg_indices.sort()  # sort the target indices
 
-                    row_indices = np.array([[i] * args.n_similar
-                                            for i in range(args.lapmod_chunk_size)]).flatten()
                     trg_indices = trg_indices.flatten()
+                    row_indices = np.array([[i] * args.n_similar
+                                            for i in range(j-i)]).flatten()
                     sim_scores = sim[row_indices, trg_indices]
                     costs = 1 - sim_scores
                     if xp != np:
@@ -361,8 +387,12 @@ def main():
                     new_kk = kk
                     for i in range(1, args.lap_repeats):
                         new_cc = np.concatenate([new_cc, cc], axis=0)
-                        # update target indices so that they refer to new columns
-                        new_kk = np.concatenate([new_kk, kk + n_rows*i], axis=0)
+                        if args.lap_prop == '1:2':
+                            # for 1:2, we don't duplicate the target indices
+                            new_kk = np.concatenate([new_kk, kk], axis=0)
+                        else:
+                            # update target indices so that they refer to new columns
+                            new_kk = np.concatenate([new_kk, kk + n_rows*i], axis=0)
                     cc = new_cc
                     kk = new_kk
                 # trg indices are targets assigned to each row id from 0-(n_rows-1)
@@ -453,13 +483,60 @@ def main():
         t = time.time()
         it += 1
 
+        if args.test_dict:
+            # save the embeddings for evaluation
+            with open(args.src_output, mode='w', encoding=args.encoding, errors='surrogateescape') as srcfile,\
+                    open(args.trg_output, mode='w', encoding=args.encoding, errors='surrogateescape') as trgfile:
+                embeddings.write(src_words, xw, srcfile)
+                embeddings.write(trg_words, zw, trgfile)
+
+            # EVALUATING TRANSLATION
+            print('Evaluating translation...')
+
+            # we skip length normalization here
+
+            # Read dictionary and compute coverage
+            f = open(args.test_dict, encoding=args.encoding,
+                     errors='surrogateescape')
+            src2trg = collections.defaultdict(set)
+            oov = set()
+            vocab = set()
+            for line in f:
+                src, trg = line.split()
+                try:
+                    src_ind = src_word2ind[src]
+                    trg_ind = trg_word2ind[trg]
+                    src2trg[src_ind].add(trg_ind)
+                    vocab.add(src)
+                except KeyError:
+                    oov.add(src)
+            src = list(src2trg.keys())
+            oov -= vocab  # If one of the translation options is in the vocabulary, then the entry is not an oov
+            coverage = len(src2trg) / (len(src2trg) + len(oov))
+
+            BATCH_SIZE = 500
+
+            # Find translations
+            translation = collections.defaultdict(int)
+
+            # we just use nearest neighbour for retrieval
+            for i in range(0, len(src), BATCH_SIZE):
+                j = min(i + BATCH_SIZE, len(src))
+                similarities = xw[src[i:j]].dot(zw.T)
+                nn = similarities.argmax(axis=1).tolist()
+                for k in range(j - i):
+                    translation[src[i + k]] = nn[k]
+
+            # Compute accuracy
+            accuracy = np.mean(
+                [1 if translation[i] in src2trg[i] else 0 for i in src])
+            print('Coverage:{0:7.2%}  Accuracy:{1:7.2%}'.format(coverage, accuracy))
+
     # Write mapped embeddings
-    srcfile = open(args.src_output, mode='w', encoding=args.encoding, errors='surrogateescape')
-    trgfile = open(args.trg_output, mode='w', encoding=args.encoding, errors='surrogateescape')
-    embeddings.write(src_words, xw, srcfile)
-    embeddings.write(trg_words, zw, trgfile)
-    srcfile.close()
-    trgfile.close()
+    with open(args.src_output, mode='w', encoding=args.encoding, errors='surrogateescape') as srcfile, \
+            open(args.trg_output, mode='w', encoding=args.encoding, errors='surrogateescape') as trgfile:
+        embeddings.write(src_words, xw, srcfile)
+        embeddings.write(trg_words, zw, trgfile)
 
 
 if __name__ == '__main__':
