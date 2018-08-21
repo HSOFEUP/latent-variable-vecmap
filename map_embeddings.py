@@ -48,7 +48,6 @@ def main():
     mapping_type = mapping_group.add_mutually_exclusive_group()
     mapping_type.add_argument('-c', '--orthogonal', action='store_true', help='use orthogonal constrained mapping')
     mapping_type.add_argument('-u', '--unconstrained', action='store_true', help='use unconstrained mapping')
-    mapping_type.add_argument('--mlp', action='store_true', help='use an MLP instead of an orthogonal mapping for learning the mapping')
     self_learning_group = parser.add_argument_group('self-learning arguments', 'Optional arguments for self-learning (ACL 2017)')
     self_learning_group.add_argument('--self_learning', action='store_true', help='enable self-learning')
     self_learning_group.add_argument('--direction', choices=['forward', 'backward', 'union'], default='forward', help='the direction for dictionary induction (defaults to forward)')
@@ -199,10 +198,6 @@ def main():
     it = 1
     t = time.time()
     while it == 1 or objective - prev_objective >= args.threshold:
-        if args.verbose:
-            print(f'# of src indices: {len(src_indices)}, '
-                  f'# of trg indices: {len(trg_indices)}', file=sys.stderr)
-
         # Update the embedding mapping
         if args.orthogonal:  # orthogonal mapping solving Procrustes problem
             u, s, vt = xp.linalg.svd(z[trg_indices].T.dot(x[src_indices]))
