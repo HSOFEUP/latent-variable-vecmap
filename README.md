@@ -1,5 +1,32 @@
-VecMap (bilingual word embedding mappings)
+Latent-Variable VecMap (bilingual word embedding mappings)
 ==============
+
+This is an extension of the [vecmap framework](https://github.com/artetxem/vecmap) for learning bilingual word embedding mappings.
+The repository contains an implementation of a latent-variable model for learning bilingual word embedding mappings as 
+described in the following paper:
+
+Sebastian Ruder*, Ryan Cotterell*, Yova Kementchedjhieva, Anders Søgaard. A Discriminative Latent-Variable Model for Bilingual Lexicon Induction. In _Proceedings of EMNLP 2018_, Brussels, Belgium.
+
+In addition to the requirements of the original repository, the implementation requires the `lap` [module](https://pypi.org/project/lap/), which 
+implements the Jonker-Volgenant algorithm for solving dense and sparse matrices. The module can be installed by running:
+```
+pip install lap
+```
+
+If you use this repository for academic research, please cite the following paper:
+```
+@inproceedings{ruder2018,
+  author    = {Ruder, Sebastian  and  Cotterell, Ryan  and  Kementchedjhieva, Yova and S{\o}gaard, Anders},
+  title     = {A Discriminative Latent-Variable Model for Bilingual Lexicon Induction},
+  booktitle = {Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing},
+  year      = {2018}
+}
+```
+
+See below for the README of the original [vecmap framework](https://github.com/artetxem/vecmap):
+
+VecMap
+--------
 
 This is an open source implementation of our framework to learn bilingual word embedding mappings, described in the following papers:
 - Mikel Artetxe, Gorka Labaka, and Eneko Agirre. 2018. **[Generalizing and improving bilingual word embedding mappings with a multi-step framework of linear transformations](http://ixa.eus/sites/default/files/dokumentuak/11455/aaai18.pdf)**. In *Proceedings of the Thirty-Second AAAI Conference on Artificial Intelligence (AAAI-18)*.
