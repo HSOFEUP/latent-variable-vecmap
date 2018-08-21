@@ -14,10 +14,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import embeddings
-import time
 from cupy_utils import *
-from mapping_utils import mlp
-from matching_utils import otsu
 
 import argparse
 import collections
@@ -25,8 +22,6 @@ import numpy as np
 import re
 import sys
 import time
-import scipy.optimize
-import munkres_sparse
 from lap import lapmod
 
 # Maximum dimensions for the similarity matrix computation in memory
@@ -63,11 +58,6 @@ def main():
     self_learning_group.add_argument('--validation', default=None, help='a dictionary file for validation at each iteration')
     self_learning_group.add_argument('--log', help='write to a log file in tsv format at each iteration')
     self_learning_group.add_argument('-v', '--verbose', action='store_true', help='write log information to stderr at each iteration')
-    self_learning_group.add_argument('--hungarian', action='store_true', help='use the hungarian algorithm for matching source with target ids')
-    self_learning_group.add_argument('--mungres', action='store_true', help='use the sparse Kuhn-Mungres algorithm for matching')
-    self_learning_group.add_argument('--otsu', action='store_true', help="use Otsu's method instead of nearest neighbour for inducing the dictionary")
-    self_learning_group.add_argument('--n-similar', type=int, default=6, help='# of most similar trg indices used for computing similarity in Otsu and Kuhn-Munkres')
-    self_learning_group.add_argument('--csls', action='store_true', help='use the CSLS scaling used in MUSE for Otsu method')
     self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
     self_learning_group.add_argument('--lapmod-chunk-size', default=1000, type=int, help='default size of matrix chunks for LAPMOD')
     self_learning_group.add_argument('--lap-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment')
@@ -87,20 +77,10 @@ def main():
         print('ERROR: De-whitening requires whitening first', file=sys.stderr)
         sys.exit(-1)
 
-    if args.self_learning:
-        if sum([args.hungarian, args.mungres, args.otsu, args.lapmod]) > 1:
-            print('ERROR: Only one of Hungarian, Mungres, Otsu, LAPMOD may be used for self-learning.', file=sys.stderr)
-            sys.exit(-1)
-
     if args.verbose:
         print("Info: arguments\n\t" + "\n\t".join(
             ["{}: {}".format(a, v) for a, v in vars(args).items()]),
               file=sys.stderr)
-        if args.mungres:
-            print(f'Using sparse Kuhn-Mungres algorithm with the top {args.n_similar} '
-                  f'most similar targets.')
-        if args.hungarian:
-            print(f'Using Hungarian algorithm with {args.n_similar}.')
 
     # Choose the right dtype for the desired precision
     if args.precision == 'fp16':
@@ -234,8 +214,6 @@ def main():
             w = x_pseudoinv.dot(z[trg_indices])
             xw = x.dot(w)
             zw = z
-        elif args.mlp:  # use an MLP for learning the mapping instead
-            xw, zw = mlp(x, z, src_indices, trg_indices, args.cuda)
         else:  # advanced mapping
             xw = x
             zw = z
@@ -286,63 +264,8 @@ def main():
             src_indices_backward = xp.zeros(z.shape[0], dtype=int)
             trg_indices_backward = xp.arange(z.shape[0])
 
-            start = time.time()
-            if args.otsu:  #  use Otsu's method
-                assert args.direction == 'forward'
-                src_indices, trg_indices = [], []
-                for i in range(0, x.shape[0]):
-
-                    sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
-                    indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of largest elements
-                    indices = indices[xp.argsort(sim[indices])][::-1]  # sort the indices by similarity
-                    sim_scores = sim[indices]
-
-                    if args.csls:
-                        avg_sim_trg = xp.mean(sim[indices])  #  get mean similarity to target words
-                        sim_src = xw[i].dot(zw.T) # get the similarity of the source id with all src words
-                        indices_src = xp.argpartition(sim_src, -(args.n_similar+1))[-(args.n_similar+1):]  # use +1 to ignore the src id itself
-                        indices_src = indices_src[xp.argsort(sim_src[indices_src])][::-1]
-                        avg_sim_src = xp.mean(sim_src[indices_src][1:])
-                        sim_scores = 2*sim_scores - avg_sim_trg - avg_sim_src
-
-                    threshold = otsu(sim_scores, xp)  # get the threshold
-                    src_indices += [i for _ in indices[:threshold]]  # add src id for every trg id
-                    trg_indices += indices[:threshold].tolist()
-                    best_sim_forward[i] = sim[indices[0]]
-                    if args.verbose and i > 0 and i % 10000 == 0:
-                        print(f'Processed {i} src examples.')
-                src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
-            elif args.hungarian:  # use linear assignment with the Hungarian algorithm
-                # compute the similarity value for all words
-                assert x.shape[0] == z.shape[0]
-                cost_matrix = xp.zeros((x.shape[0], x.shape[0]))  # use numpy for scipy compatibility
-                for i in range(0, x.shape[0], MAX_DIM_X):
-                    j = min(x.shape[0], i + MAX_DIM_X)
-                    if args.verbose:
-                        print(f'src ids: {i}-{j}', file=sys.stderr)
-                    for k in range(0, z.shape[0], MAX_DIM_Z):
-                        l = min(z.shape[0], k + MAX_DIM_Z)
-                        cost_matrix[i:j, k:l] = 1 - xw[i:j].dot(zw[k:l].T)  # calculate 1-sim to obtain cost
-                if xp != np:
-                    cost_matrix = xp.asnumpy(cost_matrix)
-                src_indices, trg_indices = scipy.optimize.linear_sum_assignment(cost_matrix)
-                best_sim_forward = 1 - cost_matrix[src_indices, trg_indices]
-            elif args.mungres:  # use the sparse kuhn-munkres algorithm for solving the linear assignment problem
-                cost_matrix_entries = []
-                for i in range(0, x.shape[0]):
-                    sim = xw[i].dot(zw.T)  # get the similarity scores of the source id with all target ids
-                    trg_indices = xp.argpartition(sim, -args.n_similar)[-args.n_similar:]  # get indices of n largest elements
-                    costs = 1 - sim[trg_indices]
-                    for j in range(0, args.n_similar):
-                        cost_matrix_entries.append((i, trg_indices[j], costs[j]))
-                print('Length of cost matrix entries:', len(cost_matrix_entries))
-                munkres_match = munkres_sparse.munkres(cost_matrix_entries)
-                print('# of matches:', len(munkres_match))
-                src_indices, trg_indices = zip(*munkres_match)
-                src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
-                for src_idx, trg_idx in zip(src_indices, trg_indices):
-                    best_sim_forward[src_idx] = xw[src_idx].dot(zw[trg_idx].T)
-            elif args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
+            if args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
+                start = time.time()
                 if args.lap_rank is not None:
                     n_rows = args.lap_rank
                     best_sim_forward = xp.full(n_rows, -100, dtype=dtype)
@@ -409,6 +332,7 @@ def main():
                         trg_indices[i] = trg_idx
                     best_sim = xw[src_idx].dot(zw[trg_idx].T)
                     best_sim_forward[src_idx] = max(best_sim_forward[src_idx], best_sim)
+                print(f'Matching took {time.time() - start}s.')
             else:
                 # for efficiency and due to space reasons, look at sub-matrices of
                 # size (MAX_DIM_X x MAX_DIM_Z)
@@ -443,8 +367,6 @@ def main():
                 elif args.direction == 'union':
                     src_indices = xp.concatenate((src_indices_forward, src_indices_backward))
                     trg_indices = xp.concatenate((trg_indices_forward, trg_indices_backward))
-
-            print(f'Matching took {time.time() - start}s.')
 
             # Objective function evaluation
             prev_objective = objective
