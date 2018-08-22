@@ -57,11 +57,12 @@ def main():
     self_learning_group.add_argument('--validation', default=None, help='a dictionary file for validation at each iteration')
     self_learning_group.add_argument('--log', help='write to a log file in tsv format at each iteration')
     self_learning_group.add_argument('-v', '--verbose', action='store_true', help='write log information to stderr at each iteration')
-    self_learning_group.add_argument('--lapmod', action='store_true', help='use the LAPMOD method')
-    self_learning_group.add_argument('--lapmod-chunk-size', default=1000, type=int, help='default size of matrix chunks for LAPMOD')
-    self_learning_group.add_argument('--lap-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment')
-    self_learning_group.add_argument('--lap-prop', default='1:1', help='specify 1:2 or 2:1 for assymmetric matching')
-    self_learning_group.add_argument('--lap-rank', type=int, help='match only the top n most frequent words during matching')
+    self_learning_group.add_argument('--lat-var', action='store_true', help='use the latent-variable model')
+    self_learning_group.add_argument('--n-similar', type=int, default=3, help='# of most similar trg indices used for sparsifying in latent-variable model')
+    self_learning_group.add_argument('--chunk-size', default=1000, type=int, help='default size of matrix chunks for latent-variable model')
+    self_learning_group.add_argument('--n-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment in latent-variable model')
+    self_learning_group.add_argument('--asym', default='1:1', help='specify 1:2 or 2:1 for assymmetric matching in latent-variable model')
+    self_learning_group.add_argument('--rank-constr', type=int, help='match only the top n most frequent words during alignment in latent-variable model')
     advanced_group = parser.add_argument_group('advanced mapping arguments', 'Advanced embedding mapping arguments (AAAI 2018)')
     advanced_group.add_argument('--whiten', action='store_true', help='whiten the embeddings')
     advanced_group.add_argument('--src_reweight', type=float, default=0, nargs='?', const=1, help='re-weight the source language embeddings')
@@ -259,24 +260,24 @@ def main():
             src_indices_backward = xp.zeros(z.shape[0], dtype=int)
             trg_indices_backward = xp.arange(z.shape[0])
 
-            if args.lapmod:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
+            if args.lat_var:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
                 start = time.time()
-                if args.lap_rank is not None:
-                    n_rows = args.lap_rank
+                if args.rank_constr is not None:
+                    n_rows = args.rank_constr
                     best_sim_forward = xp.full(n_rows, -100, dtype=dtype)
                 else:
                     n_rows = xw.shape[0] # number of rows of the assignment cost matrix
                 cc = np.empty(n_rows * args.n_similar)  # 1D array of all finite elements of the assignement cost matrix
                 kk = np.empty(n_rows * args.n_similar)  # 1D array of the column indices. Must be sorted within one row.
-                ii = np.empty((n_rows * args.lap_repeats + 1,), dtype=int)   # 1D array of indices of the row starts in cc.
+                ii = np.empty((n_rows * args.n_repeats + 1,), dtype=int)   # 1D array of indices of the row starts in cc.
                 ii[0] = 0
                 # if each src id should be matched to trg id, then we need to double the source indices
-                for i in range(1, n_rows * args.lap_repeats + 1):
+                for i in range(1, n_rows * args.n_repeats + 1):
                     ii[i] = ii[i - 1] + args.n_similar
                 start_time = time.time()
-                for i in range(0, n_rows, args.lapmod_chunk_size):
-                    j = min(x.shape[0], i + args.lapmod_chunk_size)
-                    if args.lap_rank:
+                for i in range(0, n_rows, args.chunk_size):
+                    j = min(x.shape[0], i + args.chunk_size)
+                    if args.rank_constr:
                         # only compute the similarity up to the specified rank
                         sim = xw[i:j].dot(zw[:n_rows].T)
                     else:
@@ -299,13 +300,13 @@ def main():
                     if i % 10000 == 0 and i > 0:
                         print(f'Processed {i} rows.')
                 print(f'Retrieval of ids took {time.time() - start_time}s.')
-                if args.lap_repeats > 1:
+                if args.n_repeats > 1:
                     # duplicate costs and target indices
                     new_cc = cc
                     new_kk = kk
-                    for i in range(1, args.lap_repeats):
+                    for i in range(1, args.n_repeats):
                         new_cc = np.concatenate([new_cc, cc], axis=0)
-                        if args.lap_prop == '1:2':
+                        if args.asym == '1:2':
                             # for 1:2, we don't duplicate the target indices
                             new_kk = np.concatenate([new_kk, kk], axis=0)
                         else:
@@ -314,12 +315,12 @@ def main():
                     cc = new_cc
                     kk = new_kk
                 # trg indices are targets assigned to each row id from 0-(n_rows-1)
-                cost, trg_indices, _ = lapmod(n_rows*args.lap_repeats, cc, ii, kk)
-                src_indices = np.concatenate([np.arange(n_rows)] * args.lap_repeats, 0)
+                cost, trg_indices, _ = lapmod(n_rows*args.n_repeats, cc, ii, kk)
+                src_indices = np.concatenate([np.arange(n_rows)] * args.n_repeats, 0)
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
                 for i in range(len(src_indices)):
                     src_idx, trg_idx = src_indices[i], trg_indices[i]
-                    # we do this if args.lap_repeats > 0 to assign the target
+                    # we do this if args.n_repeats > 0 to assign the target
                     # indices in the cost matrix to the correct idx
                     while trg_idx >= n_rows:
                         # if we repeat, we have indices that are > n_rows
