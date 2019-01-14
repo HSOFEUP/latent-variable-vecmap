@@ -318,6 +318,18 @@ def main():
                 cost, trg_indices, _ = lapmod(n_rows*args.n_repeats, cc, ii, kk)
                 src_indices = np.concatenate([np.arange(n_rows)] * args.n_repeats, 0)
                 src_indices, trg_indices = xp.asarray(src_indices), xp.asarray(trg_indices)
+
+                # remove the pairs in which a source word was connected to a target
+                # which was not one of its k most similar words
+                wrong_inds = []
+                for i, trgind in enumerate(trg_indices):
+                    krow = ii[i]
+                    candidates = kk[krow:krow + args.n_similar]
+                    if trgind not in candidates:
+                         wrong_inds.append(i)
+                trg_indices = np.delete(trg_indices, wrong_inds)
+                src_indices = np.delete(src_indices, wrong_inds)
+
                 for i in range(len(src_indices)):
                     src_idx, trg_idx = src_indices[i], trg_indices[i]
                     # we do this if args.n_repeats > 0 to assign the target
@@ -328,6 +340,7 @@ def main():
                         trg_indices[i] = trg_idx
                     best_sim = xw[src_idx].dot(zw[trg_idx].T)
                     best_sim_forward[src_idx] = max(best_sim_forward[src_idx], best_sim)
+                best_sim_forward = np.extract(best_sim_forward != -100, best_sim_forward)
                 print(f'Matching took {time.time() - start}s.')
             else:
                 # for efficiency and due to space reasons, look at sub-matrices of
