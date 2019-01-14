@@ -25,6 +25,17 @@ If you use this repository for academic research, please cite the following pape
 
 See below for the README of the original [vecmap framework](https://github.com/artetxem/vecmap):
 
+Reproducing results
+--------
+
+For reproducing the results reported in the paper, simply clone the repository, download the datasets with the provided script, and run the experiment script as follows:
+```
+git clone https://github.com/sebastianruder/latent-variable-vecmap.git
+cd latent-variable-vecmap
+./get_data.sh
+./reproduce_emnlp2018.sh
+```
+
 VecMap
 --------
 
