@@ -63,6 +63,7 @@ def main():
     parser.add_argument('--cuda', action='store_true', help='use cuda (requires cupy)')
     parser.add_argument('--batch_size', default=10000, type=int, help='batch size (defaults to 10000); does not affect results, larger is usually faster but uses more memory')
     parser.add_argument('--seed', type=int, default=0, help='the random seed (defaults to 0)')
+    parser.add_argument('--test-dict', help='the test dictionary file')
 
     recommended_group = parser.add_argument_group('recommended settings', 'Recommended settings for different scenarios')
     recommended_type = recommended_group.add_mutually_exclusive_group()
@@ -76,12 +77,15 @@ def main():
     # Note: changed the argument so that dictionary is supplied with -d instead
     recommended_type.add_argument('--acl2017_seed', action='store_true', help='reproduce our ACL 2017 system with a seed dictionary')
     recommended_type.add_argument('--emnlp2016', metavar='DICTIONARY', help='reproduce our EMNLP 2016 system')
+    # still requires specifying a seed dictionary or another init
     recommended_type.add_argument('--ruder_emnlp2018', action='store_true', help='reproduce EMNLP 2018 latent-variable model of Ruder et al.')
+    # model is only run in unsupervised mode
+    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018_unsupervised', action='store_true', help='run Ruder et al. (EMNLP 2018) with modifications from Artetxe et al. (ACL 2018)')
+    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018', action='store_true', help='run Ruder et al. (EMNLP 2018) with modifications from Artetxe et al. (ACL 2018)')
 
     init_group = parser.add_argument_group('advanced initialization arguments', 'Advanced initialization arguments')
     init_type = init_group.add_mutually_exclusive_group()
     init_type.add_argument('-d', '--init_dictionary', default=sys.stdin.fileno(), metavar='DICTIONARY', help='the training dictionary file (defaults to stdin)')
-    init_type.add_argument('--test-dict', help='the test dictionary file')
     init_type.add_argument('--init_identical', action='store_true', help='use identical words as the seed dictionary')
     init_type.add_argument('--init_numerals', action='store_true', help='use latin numerals (i.e. words matching [0-9]+) as the seed dictionary')
     init_type.add_argument('--init_unsupervised', action='store_true', help='use unsupervised initialization')
@@ -127,8 +131,12 @@ def main():
         parser.set_defaults(init_dictionary=args.semi_supervised, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
     if args.identical:
         parser.set_defaults(init_identical=True, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
+    if args.ruder_emnlp2018_artetxe_acl2018_unsupervised:
+        parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10, lat_var=True, n_similar=3, rank_constr=40000, direction='forward')
+    if args.ruder_emnlp2018_artetxe_acl2018:
+        parser.set_defaults(normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10, lat_var=True, n_similar=3, rank_constr=40000, direction='forward')
     if args.ruder_emnlp2018:
-        parser.set_defaults(init_numerals=True, orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='forward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, rank_constr=40000)
+        parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='forward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, rank_constr=40000)
     if args.unsupervised or args.acl2018:
         parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
     if args.aaai2018:
@@ -189,6 +197,7 @@ def main():
     src_indices = []
     trg_indices = []
     if args.init_unsupervised:
+        print('Using unsupervised initialization...')
         sim_size = min(x.shape[0], z.shape[0]) if args.unsupervised_vocab <= 0 else min(x.shape[0], z.shape[0], args.unsupervised_vocab)
         u, s, vt = xp.linalg.svd(x[:sim_size], full_matrices=False)
         xsim = (u*s).dot(u.T)
@@ -215,6 +224,7 @@ def main():
             trg_indices = xp.concatenate((sim.argmax(axis=1), xp.arange(sim_size)))
         del xsim, zsim, sim
     elif args.init_numerals:
+        print('Using numerals as seeds...')
         numeral_regex = re.compile('^[0-9]+$')
         src_numerals = {word for word in src_words if numeral_regex.match(word) is not None}
         trg_numerals = {word for word in trg_words if numeral_regex.match(word) is not None}
@@ -223,7 +233,7 @@ def main():
             src_indices.append(src_word2ind[word])
             trg_indices.append(trg_word2ind[word])
     elif args.init_identical:
-        print('Using identical strings as dictionary...')
+        print('Using identical strings as seeds...')
         identical = set(src_words).intersection(set(trg_words))
         print(f'Found {len(identical)} identical strings.')
         for word in identical:
@@ -240,6 +250,7 @@ def main():
                 trg_indices.append(trg_ind)
             except KeyError:
                 print('WARNING: OOV dictionary entry ({0} - {1})'.format(src, trg), file=sys.stderr)
+        print(f'Using a dictionary of size {len(src_indices)}.')
 
     # Read validation dictionary
     if args.validation is not None:
