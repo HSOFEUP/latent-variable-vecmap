@@ -36,6 +36,34 @@ cd latent-variable-vecmap
 ./reproduce_emnlp2018.sh
 ```
 
+This runs the latent-variable model with the best-performing hyper-parameters on 
+English-Italian, English-German, and English-Finnish. For each language pair,
+it runs the method with the a 5000 word seed dictionary, a 25 word seed dictionary,
+using numerals as seed dictionary, and using identically spelled strings as seed dictionary.
+You can run the method on a subset of these by simply removing the other options from the script.
+
+You can also run the method with the following command if you use a dictionary:
+```
+python3 map_embeddings.py --ruder_emnlp2018 -d TRAIN.DICT SRC.EMB TRG.EMB SRC_MAPPED.EMB TRG_MAPPED.EMB
+```
+Similarly, you can use the following command for numerals as seed dictionary:
+```
+python3 map_embeddings.py --ruder_emnlp2018 --init_numerals SRC.EMB TRG.EMB SRC_MAPPED.EMB TRG_MAPPED.EMB
+```
+and the following command for identically spelled strings as seed dictionary:
+```
+python3 map_embeddings.py --ruder_emnlp2018 --init_identical SRC.EMB TRG.EMB SRC_MAPPED.EMB TRG_MAPPED.EMB
+```
+
+In practice, if the target language is morphologically rich and has multiple possible translations for each English word,
+we have found that we can achieve significantly higher performance if we perform the matching from target to source. You can
+run this model by using `--ruder_emnlp2018_backward` instead of `--ruder_emnlp2018`. For example:
+```
+python3 map_embeddings.py --ruder_emnlp2018_backward -d TRAIN.DICT SRC.EMB TRG.EMB SRC_MAPPED.EMB TRG_MAPPED.EMB
+```
+
+You can use `-v` (`--verbose`) to track the progress of the model during training.
+
 VecMap (cross-lingual word embedding mappings)
 ==============
 
