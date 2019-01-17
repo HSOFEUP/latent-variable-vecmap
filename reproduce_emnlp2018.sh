@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (C) 2018  Sebastian Ruder <sebastian@ruder.io>
+# Copyright (C) 2019 Sebastian Ruder <sebastian@ruder.io>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,14 +17,11 @@
 
 ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 DATA="$ROOT/data"
-OUTPUT="$ROOT/output/emnlp2018"
+OUTPUT="$ROOT/output/"
 
-METHOD_COUNT=7
-METHOD_IDS=('mikolov2013a' 'xing2015' 'zhang2016' 'artetxe2016' 'artexte2017' 'ruder2018' 'ruder2018_rank_constr')
-METHOD_NAMES=('Mikolov et al. (2013a)' 'Xing et al. (2015)    ' 'Zhang et al. (2016)   ' 'Artetxe et al. (2016) ' 'Artexte et al. (2017)       ' 'Ours (1:1)         ' 'Ours (1:1, rank constr.)     ')
-METHOD_TRAIN_ARGS=('--mlp --self_learning' '--unconstrained' '--orthogonal' '--orthogonal' '--orthogonal' '--orthogonal --self_learning' '--orthogonal --self_learning --lat-var --n-similar 3' '--orthogonal --self_learning --lat-var --n-similar 3 --rank-constr 40000')
-METHOD_EVAL_ARGS=('--dot' '' '' '' '' '--dot' '--dot' '--dot')
-METHOD_EMBEDDINGS=('unit-center' 'original' 'unit' 'original' 'unit-center' 'unit-center' 'unit-center' 'unit-center')
+METHOD_COUNT=1
+METHOD_NAMES=('Latent-variable')
+METHOD_TRAIN_ARGS=('--ruder_emnlp2018')
 
 LANGUAGE_COUNT=3
 LANGUAGE_SRCS=('en' 'en' 'en')
@@ -35,7 +32,7 @@ DICTIONARY_COUNT=4
 DICTIONARY_IDS=('5000' '25' 'numerals' 'identical')
 DICTIONARY_NAMES=('5,000 WORD DICTIONARY' '25 WORD DICTIONARY' 'NUMERAL DICTIONARY' 'IDENTICAL STRINGS DICTIONARY')
 DICTIONARY_SIZES=('5000' '25' '0' '0')
-DICTIONARY_TRAIN_ARGS=('' '' '--numerals' '--identical')
+DICTIONARY_TRAIN_ARGS=('' '' '--init_numerals' '--init_identical')
 
 SIMILARITY_DATASET_COUNT=2
 SIMILARITY_DATASET_IDS=('mws353' 'rg65')
@@ -53,15 +50,17 @@ do
         echo ${DICTIONARY_NAMES[$j]}
         for ((k = 0; k < $METHOD_COUNT; k++))
         do
-            embedding_dir="$DATA/embeddings/${METHOD_EMBEDDINGS[$k]}"
-            output_dir="$OUTPUT/$src-$trg/${DICTIONARY_IDS[$j]}/${METHOD_IDS[$k]}"
+            embedding_dir="$DATA/embeddings"
+            output_dir="$OUTPUT/$src-$trg/${DICTIONARY_IDS[$j]}/${METHOD_NAMES[$k]}"
             mkdir -p "$output_dir"
-
             # adding cuda arguments; add verbose
-            args="${METHOD_TRAIN_ARGS[$k]} ${DICTIONARY_TRAIN_ARGS[$j]} --precision fp32 -v --cuda"
+            args="${METHOD_TRAIN_ARGS[$k]} ${DICTIONARY_TRAIN_ARGS[$j]} --precision fp32 -v"
             head -${DICTIONARY_SIZES[$j]} "$DATA/dictionaries/$src-$trg.train.shuf.txt" | python3 "$ROOT/map_embeddings.py" "$embedding_dir/$src.emb.txt" "$embedding_dir/$trg.emb.txt" "$output_dir/$src.emb.txt" "$output_dir/$trg.emb.txt" $args
-            echo -n "  - ${METHOD_NAMES[$k]}  |  Translation"
-            python3 "$ROOT/eval_translation.py" ${METHOD_EVAL_ARGS[$k]} -d "$DATA/dictionaries/$src-$trg.test.txt" "$output_dir/$src.emb.txt" "$output_dir/$trg.emb.txt" | grep -Eo ':[^:]+%' | tail -1 | tr -d '\n'
+            # evaluate translation with both nearest neighbour and CSLS retrieval
+            echo -n "  - ${METHOD_NAMES[$k]}  |  Translation NN"
+            python3 "$ROOT/eval_translation.py" --retrieval nn -d "$DATA/dictionaries/$src-$trg.test.txt" "$output_dir/$src.emb.txt" "$output_dir/$trg.emb.txt" | grep -Eo ':[^:]+%' | tail -1 | tr -d '\n'
+            echo -n "  - ${METHOD_NAMES[$k]}  |  Translation CSLS"
+            python3 "$ROOT/eval_translation.py" --retrieval csls -d "$DATA/dictionaries/$src-$trg.test.txt" "$output_dir/$src.emb.txt" "$output_dir/$trg.emb.txt" | grep -Eo ':[^:]+%' | tail -1 | tr -d '\n'
             for ((l = 0; l < $SIMILARITY_DATASET_COUNT; l++))
             do
                 dataset="$DATA/similarity/$src-$trg.${SIMILARITY_DATASET_IDS[$l]}.txt"

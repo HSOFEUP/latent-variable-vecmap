@@ -22,7 +22,8 @@ import numpy as np
 import re
 import sys
 import time
-from lat_var import lat_var
+import lat_var
+
 
 def dropout(m, p):
     if p <= 0.0:
@@ -79,9 +80,9 @@ def main():
     recommended_type.add_argument('--emnlp2016', metavar='DICTIONARY', help='reproduce our EMNLP 2016 system')
     # still requires specifying a seed dictionary or another init
     recommended_type.add_argument('--ruder_emnlp2018', action='store_true', help='reproduce EMNLP 2018 latent-variable model of Ruder et al.')
-    # model is only run in unsupervised mode
-    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018_unsupervised', action='store_true', help='run Ruder et al. (EMNLP 2018) with modifications from Artetxe et al. (ACL 2018)')
-    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018', action='store_true', help='run Ruder et al. (EMNLP 2018) with modifications from Artetxe et al. (ACL 2018)')
+    recommended_type.add_argument('--ruder_emnlp2018_backward', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
+    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018_unsupervised', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
+    recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
 
     init_group = parser.add_argument_group('advanced initialization arguments', 'Advanced initialization arguments')
     init_type = init_group.add_mutually_exclusive_group()
@@ -119,10 +120,8 @@ def main():
     lat_var_group = parser.add_argument_group('arguments for latent-variable model', 'Arguments for latent-variable model')
     lat_var_group.add_argument('--lat-var', action='store_true', help='use the latent-variable model')
     lat_var_group.add_argument('--n-similar', type=int, default=3, help='# of most similar trg indices used for sparsifying in latent-variable model')
-    lat_var_group.add_argument('--chunk-size', default=1000, type=int, help='default size of matrix chunks for latent-variable model')
     lat_var_group.add_argument('--n-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment in latent-variable model')
     lat_var_group.add_argument('--asym', default='1:1', help='specify 1:2 or 2:1 for assymmetric matching in latent-variable model')
-    lat_var_group.add_argument('--rank-constr', type=int, help='match only the top n most frequent words during alignment in latent-variable model')
     args = parser.parse_args()
 
     if args.supervised is not None:
@@ -131,12 +130,18 @@ def main():
         parser.set_defaults(init_dictionary=args.semi_supervised, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
     if args.identical:
         parser.set_defaults(init_identical=True, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
+
+    # reduce stochastic interval
+    # note: just backward direction works surprisingly well
     if args.ruder_emnlp2018_artetxe_acl2018_unsupervised:
-        parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10, lat_var=True, n_similar=3, rank_constr=40000, direction='forward')
+        parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=40000, csls_neighborhood=10, lat_var=True, n_similar=3, direction='union', stochastic_interval=3)
     if args.ruder_emnlp2018_artetxe_acl2018:
-        parser.set_defaults(normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10, lat_var=True, n_similar=3, rank_constr=40000, direction='forward')
+        parser.set_defaults(normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=40000, csls_neighborhood=10, lat_var=True, n_similar=3, direction='union', stochastic_interval=3)
     if args.ruder_emnlp2018:
-        parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='forward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, rank_constr=40000)
+        parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='forward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, vocabulary_cutoff=40000)
+    if args.ruder_emnlp2018_backward:
+        parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='backward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, vocabulary_cutoff=40000)
+
     if args.unsupervised or args.acl2018:
         parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
     if args.aaai2018:
@@ -366,44 +371,60 @@ def main():
             break
         else:
             # Update the training dictionary
-            if args.lat_var:  # use the LAPMOD algorithm for solving the sparse linear assignment problem
-                src_indices, trg_indices, best_sim_forward = lat_var(
-                    xp, dtype, x, xw, zw, args.rank_constr, args.n_similar,
-                    args.n_repeats, args.chunk_size, args.asym)
-            else:
-                if args.direction in ('forward', 'union'):
-                    if args.csls_neighborhood > 0:
-                        for i in range(0, trg_size, simbwd.shape[0]):
-                            j = min(i + simbwd.shape[0], trg_size)
-                            zw[i:j].dot(xw[:src_size].T, out=simbwd[:j-i])
-                            knn_sim_bwd[i:j] = topk_mean(simbwd[:j-i], k=args.csls_neighborhood, inplace=True)
-                    for i in range(0, src_size, simfwd.shape[0]):
-                        j = min(i + simfwd.shape[0], src_size)
-                        xw[i:j].dot(zw[:trg_size].T, out=simfwd[:j-i])
-                        simfwd[:j-i].max(axis=1, out=best_sim_forward[i:j])
-                        simfwd[:j-i] -= knn_sim_bwd/2  # Equivalent to the real CSLS scores for NN
-                        dropout(simfwd[:j-i], 1 - keep_prob).argmax(axis=1, out=trg_indices_forward[i:j])
-                if args.direction in ('backward', 'union'):
-                    if args.csls_neighborhood > 0:
-                        for i in range(0, src_size, simfwd.shape[0]):
-                            j = min(i + simfwd.shape[0], src_size)
-                            xw[i:j].dot(zw[:trg_size].T, out=simfwd[:j-i])
-                            knn_sim_fwd[i:j] = topk_mean(simfwd[:j-i], k=args.csls_neighborhood, inplace=True)
+            sims = np.zeros((src_size, trg_size), dtype=dtype)
+            if args.direction in ('forward', 'union'):
+                if args.csls_neighborhood > 0:
                     for i in range(0, trg_size, simbwd.shape[0]):
                         j = min(i + simbwd.shape[0], trg_size)
                         zw[i:j].dot(xw[:src_size].T, out=simbwd[:j-i])
-                        simbwd[:j-i].max(axis=1, out=best_sim_backward[i:j])
-                        simbwd[:j-i] -= knn_sim_fwd/2  # Equivalent to the real CSLS scores for NN
-                        dropout(simbwd[:j-i], 1 - keep_prob).argmax(axis=1, out=src_indices_backward[i:j])
-                if args.direction == 'forward':
-                    src_indices = src_indices_forward
-                    trg_indices = trg_indices_forward
-                elif args.direction == 'backward':
-                    src_indices = src_indices_backward
-                    trg_indices = trg_indices_backward
-                elif args.direction == 'union':
-                    src_indices = xp.concatenate((src_indices_forward, src_indices_backward))
-                    trg_indices = xp.concatenate((trg_indices_forward, trg_indices_backward))
+                        knn_sim_bwd[i:j] = topk_mean(simbwd[:j-i], k=args.csls_neighborhood, inplace=True)
+                for i in range(0, src_size, simfwd.shape[0]):
+                    j = min(i + simfwd.shape[0], src_size)
+                    xw[i:j].dot(zw[:trg_size].T, out=simfwd[:j-i])
+                    simfwd[:j-i].max(axis=1, out=best_sim_forward[i:j])
+                    simfwd[:j-i] -= knn_sim_bwd/2  # Equivalent to the real CSLS scores for NN
+                    simfwd[:j-i] = dropout(simfwd[:j-i], 1 - keep_prob)
+                    if not args.lat_var:
+                        # we get a dimension mismatch here as lat_var may produce fewer seeds
+                        simfwd[:j-i].argmax(axis=1, out=trg_indices_forward[i:j])
+                    sims[i:j] = simfwd
+                if args.lat_var:
+                    # TODO check if we can save memory by not storing a large sims matrix
+                    src_indices_forward, trg_indices_forward = lat_var.lat_var(
+                        xp, sims, args.n_similar, args.n_repeats, args.batch_size, args.asym)
+            if args.direction in ('backward', 'union'):
+                if args.csls_neighborhood > 0:
+                    for i in range(0, src_size, simfwd.shape[0]):
+                        j = min(i + simfwd.shape[0], src_size)
+                        xw[i:j].dot(zw[:trg_size].T, out=simfwd[:j-i])
+                        knn_sim_fwd[i:j] = topk_mean(simfwd[:j-i], k=args.csls_neighborhood, inplace=True)
+                for i in range(0, trg_size, simbwd.shape[0]):
+                    j = min(i + simbwd.shape[0], trg_size)
+                    zw[i:j].dot(xw[:src_size].T, out=simbwd[:j-i])
+                    simbwd[:j-i].max(axis=1, out=best_sim_backward[i:j])
+                    simbwd[:j-i] -= knn_sim_fwd/2  # Equivalent to the real CSLS scores for NN
+                    simbwd[:j-i] = dropout(simbwd[:j-i], 1 - keep_prob)
+                    if not args.lat_var:
+                        simbwd[:j-i].argmax(axis=1,out=src_indices_backward[i:j])
+                    sims[i:j] = simbwd
+                if args.lat_var:
+                    # swap the order of the indices
+                    trg_indices_backward, src_indices_backward = lat_var.lat_var(
+                        xp, sims, args.n_similar, args.n_repeats, args.batch_size, args.asym)
+            if args.direction == 'forward':
+                src_indices = src_indices_forward
+                trg_indices = trg_indices_forward
+            elif args.direction == 'backward':
+                src_indices = src_indices_backward
+                trg_indices = trg_indices_backward
+            elif args.direction == 'union':
+                src_indices = xp.concatenate((src_indices_forward, src_indices_backward))
+                trg_indices = xp.concatenate((trg_indices_forward, trg_indices_backward))
+            # elif args.direction == 'intersection':
+            #     fwd_pairs = zip(src_indices_forward, trg_indices_forward)
+            #     bwd_pairs = zip(src_indices_backward, trg_indices_backward)
+            #     src_indices, trg_indices = zip(*set(fwd_pairs).intersection(bwd_pairs))
+            #     src_indices, trg_indices = xp.array(src_indices), xp.array(trg_indices)
 
             # Objective function evaluation
             if args.direction == 'forward':
