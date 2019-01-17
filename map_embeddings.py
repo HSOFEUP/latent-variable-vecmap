@@ -202,7 +202,8 @@ def main():
     src_indices = []
     trg_indices = []
     if args.init_unsupervised:
-        print('Using unsupervised initialization...')
+        if args.verbose:
+            print('Using unsupervised initialization...')
         sim_size = min(x.shape[0], z.shape[0]) if args.unsupervised_vocab <= 0 else min(x.shape[0], z.shape[0], args.unsupervised_vocab)
         u, s, vt = xp.linalg.svd(x[:sim_size], full_matrices=False)
         xsim = (u*s).dot(u.T)
@@ -229,7 +230,8 @@ def main():
             trg_indices = xp.concatenate((sim.argmax(axis=1), xp.arange(sim_size)))
         del xsim, zsim, sim
     elif args.init_numerals:
-        print('Using numerals as seeds...')
+        if args.verbose:
+            print('Using numerals as seeds...')
         numeral_regex = re.compile('^[0-9]+$')
         src_numerals = {word for word in src_words if numeral_regex.match(word) is not None}
         trg_numerals = {word for word in trg_words if numeral_regex.match(word) is not None}
@@ -238,9 +240,10 @@ def main():
             src_indices.append(src_word2ind[word])
             trg_indices.append(trg_word2ind[word])
     elif args.init_identical:
-        print('Using identical strings as seeds...')
         identical = set(src_words).intersection(set(trg_words))
-        print(f'Found {len(identical)} identical strings.')
+        if args.verbose:
+            print('Using identical strings as seeds...')
+            print(f'Found {len(identical)} identical strings.')
         for word in identical:
             src_indices.append(src_word2ind[word])
             trg_indices.append(trg_word2ind[word])

@@ -1,5 +1,4 @@
 import numpy as np
-import time
 from lap import lapmod
 
 
@@ -19,8 +18,6 @@ def lat_var(xp, sims, n_similar, n_repeats, batch_size, asym):
     :param asym:
     :return:
     """
-    start = time.time()
-
     src_size = sims.shape[0]
     cc = np.empty(src_size * n_similar)  # 1D array of all finite elements of the assignement cost matrix
     kk = np.empty(src_size * n_similar)  # 1D array of the column indices. Must be sorted within one row.
@@ -29,7 +26,6 @@ def lat_var(xp, sims, n_similar, n_repeats, batch_size, asym):
     # if each src id should be matched to trg id, then we need to double the source indices
     for i in range(1, src_size * n_repeats + 1):
         ii[i] = ii[i - 1] + n_similar
-    start_time = time.time()
     for i in range(0, src_size, batch_size):
         # j = min(x.shape[0], i + batch_size)
         j = min(i + batch_size, src_size)
@@ -48,7 +44,6 @@ def lat_var(xp, sims, n_similar, n_repeats, batch_size, asym):
             costs = xp.asnumpy(costs)
         cc[i * n_similar:j * n_similar] = costs
         kk[i * n_similar:j * n_similar] = trg_indices
-    print(f'Retrieval of ids took {int(time.time() - start_time)}s.')
     if n_repeats > 1:
         # duplicate costs and target indices
         new_cc = cc
@@ -87,7 +82,4 @@ def lat_var(xp, sims, n_similar, n_repeats, batch_size, asym):
             # if we repeat, we have indices that are > n_rows
             trg_idx -= src_size
             trg_indices[i] = trg_idx
-        # best_sim = xw[src_idx].dot(zw[trg_idx].T)
-        # best_sim_forward[src_idx] = best_sim
-    print(f'Matching took {int(time.time() - start)}s.')
     return src_indices, trg_indices
