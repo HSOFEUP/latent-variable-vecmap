@@ -64,6 +64,29 @@ python3 map_embeddings.py --ruder_emnlp2018_backward -d TRAIN.DICT SRC.EMB TRG.E
 
 You can use `-v` (`--verbose`) to track the progress of the model during training.
 
+
+Ongoing developments
+==============
+Install PyTorch from [the PyTorch website](https://pytorch.org/). 
+Install Cython.
+
+Clone the SparseMAP directory. Clone ad3 and install ad3.
+```bash
+git clone https://github.com/vene/sparsemap
+git clone https://github.com/andre-martins/ad3
+export AD3_DIR=PATH_TO_AD3_DIR
+cd ad3
+make
+python setup.py install
+cd ../sparsemap/python
+python setup.py build_ext --inplace
+# clone and install smooth-ot 
+git clone https://github.com/mblondel/smooth-ot.git
+pip install numpy scipy scikit-learn nose
+cd smooth-ot
+python setup.py install
+```
+
 VecMap (cross-lingual word embedding mappings)
 ==============
 

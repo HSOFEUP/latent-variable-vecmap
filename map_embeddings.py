@@ -22,7 +22,7 @@ import numpy as np
 import re
 import sys
 import time
-import lat_var
+import sparse_vecmap
 
 
 def dropout(m, p):
@@ -83,6 +83,7 @@ def main():
     recommended_type.add_argument('--ruder_emnlp2018_backward', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
     recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018_unsupervised', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
     recommended_type.add_argument('--ruder_emnlp2018_artetxe_acl2018', action='store_true', help='reproduce Ruder et al. (EMNLP 2018) with matching in backward direction')
+    recommended_type.add_argument('--sparse_vecmap', action='store_true', help='run SparseVecMAP')
 
     init_group = parser.add_argument_group('advanced initialization arguments', 'Advanced initialization arguments')
     init_type = init_group.add_mutually_exclusive_group()
@@ -122,6 +123,11 @@ def main():
     lat_var_group.add_argument('--n-similar', type=int, default=3, help='# of most similar trg indices used for sparsifying in latent-variable model')
     lat_var_group.add_argument('--n-repeats', default=1, type=int, help='repeats embeddings to get 2:2, 3:3, etc. alignment in latent-variable model')
     lat_var_group.add_argument('--asym', default='1:1', help='specify 1:2 or 2:1 for assymmetric matching in latent-variable model')
+
+    sparse_vecmap_group = parser.add_argument_group('arguments for sparse vecmap', 'Arguments for SparseVecMAP')
+    sparse_vecmap_group.add_argument('--max-iter', type=int, default=10, help='max # of iterations in SparseMAP')
+    sparse_vecmap_group.add_argument('--solver', default='sparsemap_fwd', choices=['sparsemap_fwd', 'sparsemap', 'sparsemap_sparse', 'ot'])
+    sparse_vecmap_group.add_argument('--gamma', type=float, default=1.0, help='gamma value for the OT solver')
     args = parser.parse_args()
 
     if args.supervised is not None:
@@ -131,8 +137,13 @@ def main():
     if args.identical:
         parser.set_defaults(init_identical=True, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
 
+    if args.sparse_vecmap:
+        # TODO potentially set vocabulary cutoff lower/higher
+        parser.set_defaults(normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, stochastic_initial=1.0, stochastic_interval=1, direction='forward')
+
     # reduce stochastic interval
     # note: just backward direction works surprisingly well
+    # TODO check how useful Artetxe default of 20,000 vocabulary cutoff is
     if args.ruder_emnlp2018_artetxe_acl2018_unsupervised:
         parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=40000, csls_neighborhood=10, lat_var=True, n_similar=3, direction='union', stochastic_interval=3)
     if args.ruder_emnlp2018_artetxe_acl2018:
@@ -141,7 +152,6 @@ def main():
         parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='forward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, vocabulary_cutoff=40000)
     if args.ruder_emnlp2018_backward:
         parser.set_defaults(orthogonal=True, normalize=['unit', 'center'], self_learning=True, direction='backward', stochastic_initial=1.0, stochastic_interval=1, batch_size=1000, lat_var=True, n_similar=3, vocabulary_cutoff=40000)
-
     if args.unsupervised or args.acl2018:
         parser.set_defaults(init_unsupervised=True, unsupervised_vocab=4000, normalize=['unit', 'center', 'unit'], whiten=True, src_reweight=0.5, trg_reweight=0.5, src_dewhiten='src', trg_dewhiten='trg', self_learning=True, vocabulary_cutoff=20000, csls_neighborhood=10)
     if args.aaai2018:
@@ -193,6 +203,9 @@ def main():
     # Build word to index map
     src_word2ind = {word: i for i, word in enumerate(src_words)}
     trg_word2ind = {word: i for i, word in enumerate(trg_words)}
+
+    ind2src_word = {i: word for i, word in enumerate(src_words)}
+    ind2trg_word = {i: word for i, word in enumerate(trg_words)}
 
     # STEP 0: Normalization
     embeddings.normalize(x, args.normalize)
@@ -374,7 +387,7 @@ def main():
             break
         else:
             # Update the training dictionary
-            sims = np.zeros((src_size, trg_size), dtype=dtype)
+            sims = xp.zeros((src_size, trg_size), dtype=dtype)
             if args.direction in ('forward', 'union'):
                 if args.csls_neighborhood > 0:
                     for i in range(0, trg_size, simbwd.shape[0]):
@@ -393,8 +406,20 @@ def main():
                     sims[i:j] = simfwd
                 if args.lat_var:
                     # TODO check if we can save memory by not storing a large sims matrix
+                    import lat_var
                     src_indices_forward, trg_indices_forward = lat_var.lat_var(
                         xp, sims, args.n_similar, args.n_repeats, args.batch_size, args.asym)
+                elif args.sparse_vecmap:
+                    import sparse_vecmap
+                    if args.cuda:
+                        sims = cupy.asnumpy(sims)
+                    src_indices_forward, trg_indices_forward = sparse_vecmap.sparse_vecmap(xp, sims, args.max_iter, args.solver, args.gamma)
+                    if args.verbose:
+                        # inspect some of the alignments
+                        inspect_len, s_id = 20, 100
+                        for src_ind, trg_ind in zip(src_indices_forward[s_id:s_id+inspect_len], trg_indices_forward[s_id:s_id+inspect_len]):
+                            print(f'{ind2src_word[src_ind]}: {ind2trg_word[trg_ind]}')
+
             if args.direction in ('backward', 'union'):
                 if args.csls_neighborhood > 0:
                     for i in range(0, src_size, simfwd.shape[0]):
